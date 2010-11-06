@@ -1,0 +1,6 @@
+A Toy Constraint Solver in Scala
+
+Scala で実装した有限領域の制約ソルバーです。
+
+http://overtond.blogspot.com/2008/07/pre.html を算術演算が行えるように拡張したものです。
+勉強がてら作ったおもちゃ実装ですので、実用的ではありません。
