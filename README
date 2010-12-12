@@ -2,5 +2,10 @@ A Toy Constraint Solver in Scala
 
 Scala で実装した有限領域の制約ソルバーです。
 
-http://overtond.blogspot.com/2008/07/pre.html を算術演算が行えるように拡張したものです。
+http://overtond.blogspot.com/2008/07/pre.html に下記の拡張を追加したもの
+
+1. 算術演算を行えるようにした。
+2. 探索戦略を動的変数順序ヒューリスティクスにした。
+3. 領域の実装として集合と範囲が使えるようにした。
+
 勉強がてら作ったおもちゃ実装ですので、実用的ではありません。

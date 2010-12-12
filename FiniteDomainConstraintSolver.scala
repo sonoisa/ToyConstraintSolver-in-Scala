@@ -1,10 +1,13 @@
 /**
  * Toy Finite Domain Constraint Solver
  * 
- * http://overtond.blogspot.com/2008/07/pre.html を算術演算が行えるように拡張したもの
+ * http://overtond.blogspot.com/2008/07/pre.html に下記の拡張を追加したもの
+ * 
+ * 1. 算術演算を行えるようにした。
+ * 2. 探索戦略を動的変数順序ヒューリスティクスにした。
+ * 3. 領域の実装として集合と範囲が使えるようにした。
  */
 trait FiniteDomainConstraintSolver {
-	
 	/** 制約充足解探索モナド (探索開始時の状態 => (制約充足解, 発見時の状態) の遅延リスト) */
 	case class FD[A](run: State => Stream[(A, State)]) {
 		def flatMap[B](k: A => FD[B]): FD[B] = FD(s0 => run(s0) flatMap { case (a, s1) => k(a).run(s1) })
@@ -26,7 +29,7 @@ trait FiniteDomainConstraintSolver {
 			ms.foldRight[M[Stream[A]]](unit(Stream.Empty))(k)
 		}
 		def mapM[A, B](as: Stream[A])(k: A => M[B]): M[Stream[B]] = sequence(as map { a => k(a) })
-		def replicateM[A](n: Int, m: M[A]): M[Stream[A]] = sequence(Stream.fill(n)(m))
+		def replicateM[A](n: Int)(m: M[A]): M[Stream[A]] = sequence(Stream.fill(n)(m))
 		def zipWithM[A, B, C](xs: Stream[A])(ys: Stream[B])(f: A => B => M[C]): M[Stream[C]] = sequence(zipWith(xs)(ys)(f))
 		def zipWith[A, B, C](xs: Stream[A])(ys: Stream[B])(f: A => B => M[C]): Stream[M[C]] = (xs, ys) match {
 			case (x #:: xs, y #:: ys) => Stream.cons(f(x)(y), zipWith(xs)(ys)(f))
@@ -56,7 +59,127 @@ trait FiniteDomainConstraintSolver {
 	import monad._
 	
 	/** 有限領域 */
-	type Domain = Set[Int]
+	sealed trait Domain {
+		def contains(value: Int): Boolean
+		def size: Int
+		def -(value: Int): Domain
+		def --(that: Domain): Domain
+		def isEmpty: Boolean
+		def &(that: Domain): Domain
+		def subsetOf(that: Domain): Boolean
+		def toStream: Stream[Int]
+		def min: Int
+		def max: Int
+		def filter(p: Int => Boolean): Domain
+		def map(f: Int => Int): Domain
+		def foreach(f: Int => Unit): Unit
+	}
+	
+	final case class SetDomain(values: Set[Int]) extends Domain {
+		def contains(value: Int): Boolean = values.contains(value)
+		def size: Int = values.size
+		def -(value: Int): Domain = new SetDomain(values - value)
+		def --(that: Domain): Domain = that match {
+			case SetDomain(s) => new SetDomain(values -- s)
+			case RangeDomain(s, e) => new SetDomain(values.filter(value => (s > value || value > e)))
+		}
+		def isEmpty: Boolean = values.isEmpty
+		def &(that: Domain): Domain = that match {
+			case SetDomain(s) => new SetDomain(values & s)
+			case RangeDomain(s, e) => new SetDomain(values.filter(value => (s <= value && value <= e)))
+		}
+		def subsetOf(that: Domain): Boolean = that match {
+			case SetDomain(s) => values.subsetOf(s)
+			case RangeDomain(s, e) => {
+				val min = values.min
+				val max = values.max
+				(s <= min && max <= e)
+			}
+		}
+		def toStream: Stream[Int] = values.toStream
+		def min: Int = values.min
+		def max: Int = values.max
+		def filter(p: Int => Boolean): Domain = new SetDomain(values.filter(p))
+		def map(f: Int => Int): Domain = new SetDomain(values map f)
+		def foreach(f: Int => Unit): Unit = values foreach f
+		override def equals(other: Any): Boolean = {
+			other match {
+				case SetDomain(s) => values == s
+				case that: RangeDomain => subsetOf(that) && that.subsetOf(this)
+				case _ => false
+			}
+		}
+		override def hashCode: Int = values.hashCode
+	}
+	
+	final case class RangeDomain(start: Int, end: Int) extends Domain {
+		def contains(value: Int): Boolean = (start <= value && value <= end)
+		def size: Int = (end - start + 1)
+		def -(value: Int): Domain = {
+			if (value == start) {
+				if (start < end) new RangeDomain(start + 1, end) else EmptyDomain
+			} else if (value == end) {
+				if (start < end) new RangeDomain(start, end - 1) else EmptyDomain
+			} else if (start < value && value < end) {
+				new SetDomain((start to value - 1).toSet | (value + 1 to end).toSet)
+			} else {
+				this
+			}
+		}
+		def --(that: Domain): Domain = that match {
+			case SetDomain(s) => {
+				if (s.min > end || s.max < start) {
+					this
+				} else {
+					new SetDomain((for { i <- start to end; if (!s.contains(i)) } yield i) toSet)
+				}
+			}
+			case RangeDomain(s, e) => {
+				if (s > end || e < start) {
+					this
+				} else if (start < s && e < end) { // s <= end && e >= start
+					new SetDomain((start to s).toSet | (e to end).toSet)
+				} else if (start < s) { // s <= end && e >= start && (start >= s || e >= end)
+					new RangeDomain(start, s - 1)
+				} else if (e < end) { // s <= end && e >= start && start >= s
+					new RangeDomain(e + 1, end)
+				} else { // s <= end && e >= start && start >= s && e >= end
+					EmptyDomain
+				}
+			}
+		}
+		def isEmpty: Boolean = (start > end)
+		def &(that: Domain): Domain = that match {
+			case SetDomain(s) => new SetDomain(s.filter(value => (start <= value && value <= end)))
+			case RangeDomain(s, e) => new RangeDomain(start.max(s), end.min(e))
+		}
+		def subsetOf(that: Domain): Boolean = that match {
+			case SetDomain(s) => s.forall(value => (start <= value && value <= end))
+			case RangeDomain(s, e) => (s <= start && end <= e)
+		}
+		def toStream: Stream[Int] = (start to end) toStream
+		val min: Int = start
+		val max: Int = end
+		def filter(p: Int => Boolean): Domain = new SetDomain((start to end) filter p toSet)
+		def map(f: Int => Int): Domain = new SetDomain((start to end) map f toSet)
+		def foreach(f: Int => Unit): Unit = for (i <- start to end) { f }
+		override def equals(other: Any): Boolean = {
+			other match {
+				case that: SetDomain => subsetOf(that) && that.subsetOf(this)
+				case RangeDomain(s, e) => (s == start && e == end)
+				case _ => false
+			}
+		}
+		override def hashCode: Int = { start + 41 * (end + 41) }
+	}
+	
+	val EmptyDomain = SetDomain(Set.empty)
+	
+	object Domain {
+		def apply(values: Set[Int]): Domain =  new SetDomain(values)
+		def apply(value: Int): Domain = new SetDomain(Set(value))
+		def apply(start: Int, end: Int): Domain = new RangeDomain(start, end)
+	}
 	
 	/** 整数領域の最小値 */
 	val minDomainValue = -100
@@ -65,7 +188,7 @@ trait FiniteDomainConstraintSolver {
 	val maxDomainValue = 100
 	
 	/** 整数領域全体 */
-	val allDomainValue: Domain = (minDomainValue to maxDomainValue).toSet
+	val allDomainValue: Domain = Domain(minDomainValue, maxDomainValue)
 	
 	/** 制約 */
 	type Constraint = FD[Unit]
@@ -74,30 +197,30 @@ trait FiniteDomainConstraintSolver {
 	case class Var(index: Int)
 	
 	/** 変数に課された制約と取りうる値 */
-	case class VarInfo(delayedConstraints: Constraint, values: Domain)
+	case class VarInfo(delayedConstraints: Constraint, countOfConstraints: Int, values: Domain)
 	
 	/** 変数環境 */
 	type VarMap = Map[Var, VarInfo]
 	
-	/** 解の探索状態 (次に割当可能な変数、変数環境) */
-	case class State(varSupply: Var, varMap: VarMap)
+	/** 解の探索状態 (次に割当可能な変数、変数環境、値が決まっていない変数、制約ネットワーク) */
+	case class State(varSupply: Var, varMap: VarMap, indefiniteVars: Set[Var] /* , network: List[String] */)
 	
 	/** 制約充足解を探す。 */
 	def solve[A](fd: FD[A]): Stream[A] = fd.run(initState).map(_._1)
 	
 	/** 初期状態 */
-	val initState: State = State(Var(0), Map.empty)
+	val initState: State = State(Var(0), Map.empty, Set.empty /* , Nil */)
 	
 	/** 領域が domain である新規変数を返す。 */
-	def newVar(domain: Traversable[Int]): FD[Var] = {
+	def newVar(domain: Domain): FD[Var] = {
 		val nextVar: FD[Var] = for {
 				state <- get
 				val x = state.varSupply
 				_ <- put(state.copy(varSupply = Var(x.index + 1)))
 			} yield x
-		def isOneOf(x: Var, domain: Traversable[Int]): Constraint = modify(state => {
+		def isOneOf(x: Var, domain: Domain): Constraint = modify(state => {
 				val env = state.varMap
-				val info = VarInfo(unit0, domain.toSet)
+				val info = VarInfo(unit0, 0, domain)
 				state.copy(varMap = env + (x -> info))
 			})
 		for {
@@ -107,19 +230,19 @@ trait FiniteDomainConstraintSolver {
 	}
 	
 	/** 領域が domain である新規変数を n 個作り返す。 */
-	def newVars(n: Int, domain: Traversable[Int]): FD[Stream[Var]] = replicateM(n, newVar(domain))
+	def newVars(n: Int, domain: Domain): FD[Stream[Var]] = replicateM(n)(newVar(domain))
 	
 	/** 変数 x の領域を返す。 */
-	def lookup(x: Var): FD[Domain] = { for { s <- get } yield s.varMap(x).values }
+	def lookup(x: Var): FD[Domain] = { for { state <- get } yield state.varMap(x).values }
 	
 	/** 変数 x の領域を domain に変更する。 */
 	def update(x: Var, domain: Domain): Constraint = {
 		for {
 			state <- get
-			val env = state.varMap 
+			val env = state.varMap
 			val info = env(x)
 			_ <- put(state.copy(varMap = env + (x -> info.copy(values = domain))))
-			_ <- info.delayedConstraints // 制約伝播
+			_ <- info.delayedConstraints // アーク整合 (AC-2アルゴリズム)
 		} yield unit0
 	}
 	
@@ -130,13 +253,34 @@ trait FiniteDomainConstraintSolver {
 			val env = state.varMap
 			val info = env(x)
 			val orgConst = info.delayedConstraints
-			_ <- put(state.copy(varMap = env + (x -> info.copy(delayedConstraints = orgConst flatMap { _ => constraint }))))
+			_ <- put(state.copy(varMap = env + (x -> info.copy(
+						delayedConstraints = orgConst flatMap { _ => constraint }, 
+						countOfConstraints = info.countOfConstraints + 1
+					))))
 		} yield unit0
 	}
+	
+//	/* 二項制約が満たされた場合、もう一方の変数に関して同じ制約をチェックする必要はなくなる。 */
+//	def decreaseCountIfConstraintIsSatisfied(constraint: Constraint)(x: Var): Constraint = {
+//		for {
+//			_ <- constraint
+//			_ <- modify(state => {
+//					val env = state.varMap
+//					val info = env(x)
+//					state.copy(varMap = env + (x -> info.copy(countOfConstraints = info.countOfConstraints - 1)))
+//				})
+//		} yield unit0
+//	}
 	
 	/** 二項制約をその対象となる変数に課す。 */
 	def createBinaryConstraint(x: Var, y: Var)(constraint: Constraint): Constraint = {
 		for {
+//			// 制約ネットワークを記録
+//			_ <- for {
+//				state <- get
+//				val network = state.network
+//				_ <- put(state.copy(network = ("%d -- %d;". format(x.index, y.index)) :: network))
+//			} yield unit0
 			_ <- constraint
 			_ <- addConstraint(x, constraint)
 			_ <- addConstraint(y, constraint)
@@ -146,6 +290,12 @@ trait FiniteDomainConstraintSolver {
 	/** 三項制約をその対象となる変数に課す。 */
 	def createTrinaryConstraint(x: Var, y: Var, z: Var)(yzConstraint: Constraint, zxConstraint: Constraint, xyConstraint: Constraint): Constraint = {
 		for {
+//			// 制約ネットワークを記録
+//			_ <- for {
+//				state <- get
+//				val network = state.network
+//				_ <- put(state.copy(network = ("%d -- %d;". format(x.index, y.index)) :: ("%d -- %d;". format(y.index, z.index)) :: ("%d -- %d;". format(z.index, x.index)) :: network))
+//			} yield unit0
 			_ <- yzConstraint
 			_ <- zxConstraint
 			_ <- xyConstraint
@@ -163,16 +313,8 @@ trait FiniteDomainConstraintSolver {
 		for {
 			vals <- lookup(x)
 			_ <- guard(vals.contains(value))
-			_ <- when (vals.size != 1 || ! vals.contains(value)) { update(x, Set(value)) }
+			_ <- when (vals.size != 1) { update(x, Domain(value)) }
 		} yield unit0
-		
-		/* XXX これを下記のコードにすると、フィルタリングされないことに注意！
-		for {
-			vals <- lookup(variable)
-			_ <- guard(vals.contains(value))
-			val i = Set(value)
-		} yield when (i != vals) { update(variable, i) }
-		*/
 	}
 	
 	/** 変数 x が値 value に等しくないという制約を返す。 */
@@ -264,12 +406,12 @@ trait FiniteDomainConstraintSolver {
 	
 	/** lhs + rhs の計算結果の領域を返す。 */
 	def addDomain(lhs: Domain, rhs: Domain): Domain = {
-		(lhs.min + rhs.min) to (lhs.max + rhs.max) toSet
+		Domain(lhs.min + rhs.min, lhs.max + rhs.max)
 	}
 	
 	/** lhs - rhs の計算結果の領域を返す。 */
 	def subDomain(lhs: Domain, rhs: Domain): Domain = {
-		(lhs.min - rhs.max) to (lhs.max - rhs.min) toSet
+		Domain(lhs.min - rhs.max, lhs.max - rhs.min)
 	}
 	
 	/** lhs * rhs の計算結果の領域を返す。 */
@@ -283,7 +425,7 @@ trait FiniteDomainConstraintSolver {
 				if (mul > max) max = mul
 			}
 		}
-		min to max toSet
+		Domain(min, max)
 	}
 	
 	/** lhs / rhs の計算結果の領域を返す。 */
@@ -303,7 +445,7 @@ trait FiniteDomainConstraintSolver {
 			  min = minDomainValue
 			  max = maxDomainValue
 		}
-		min to max toSet
+		Domain(min, max)
 	}
 	
 	/** ans が lhs + rhs に等しいという制約を返す。 */
@@ -416,6 +558,12 @@ trait FiniteDomainConstraintSolver {
 		/** Int にメソッドを追加する暗黙の型変換 */
 		implicit def enrichInt(x: Int): RichInt = new RichInt(x)
 		
+		/** Range から Domain への暗黙の型変換 */
+		implicit def rangeToDomain(range: Range): Domain = Domain(range.start, range.end)
+		
+		/** Int から Domain への暗黙の型変換 */
+		implicit def intToDomain(value: Int): Domain = Domain(value)
+		
 		/** Var にメソッドを追加したクラス */
 		class RichVar(x: Var) {
 			def <(rhs: Var): Constraint = lessThan(x, rhs)
@@ -475,13 +623,49 @@ trait FiniteDomainConstraintSolver {
 	
 	/** 変数リスト xs の値リストを返す。 */
 	def labeling(xs: Stream[Var]): FD[Stream[Int]] = {
-		def label(x: Var): FD[Int] = {
+		val indefiniteVars = xs.toSet
+		
+		// 動的な変数順序のヒューリスティクス
+		def label: FD[(Var, Int)] = {
 			for {
+				state <- get
+				x <- {
+					var smallestDomainSize = Integer.MAX_VALUE
+					var smallestDomainConstraintSize = -1
+					var smallestDomainVar: Var = null
+					val indefiniteVars = state.indefiniteVars
+					for (x <- indefiniteVars) {
+						val info = state.varMap(x)
+						val size = info.values.size
+//						if (info.countOfConstraints > smallestDomainConstraintSize || (info.countOfConstraints == smallestDomainConstraintSize && size < smallestDomainSize)) {
+						if (size < smallestDomainSize || (size == smallestDomainSize && info.countOfConstraints > smallestDomainConstraintSize)) {
+							smallestDomainSize = size
+							smallestDomainConstraintSize = info.countOfConstraints
+							smallestDomainVar = x
+						}
+					}
+					//println("smallestDomainVar: " + smallestDomainVar + ", size: " + smallestDomainSize)
+					unit(smallestDomainVar)
+				}
+				_ <- put(state.copy(indefiniteVars = state.indefiniteVars - x))
 				vals <- lookup(x)
 				v <- lift(vals.toStream)
 				_ <- hasValue(x, v)
-			} yield v
+			} yield (x, v)
 		}
-		mapM(xs) { label }
+		for {
+			_ <- modify(state => state.copy(indefiniteVars = indefiniteVars))
+			varVals <- replicateM(indefiniteVars.size) { label }
+			val valForVar = varVals.toMap
+		} yield (xs map { x => valForVar(x) })
+		
+//		def label(x: Var): FD[Int] = {
+//			for {
+//				vals <- lookup(x)
+//				v <- lift(vals.toStream)
+//				_ <- hasValue(x, v)
+//			} yield v
+//		}
+//		mapM(xs) { label }
 	}
 }

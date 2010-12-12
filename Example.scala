@@ -80,7 +80,7 @@ object Example extends FiniteDomainConstraintSolver {
 		
 		def sudoku(puzzle: Puzzle) = {
 			for {
-				vars <- newVars(81, 1 to 9 toList)
+				vars <- newVars(81, 1 to 9)
 				_ <- zipWithM(vars)(puzzle)(x => n => when (n > 0) { hasValue(x, n) })
 				_ <- mapM(rows(vars)) { allDifferent }
 				_ <- mapM(columns(vars)) { allDifferent }
@@ -105,37 +105,9 @@ object Example extends FiniteDomainConstraintSolver {
 	 * 3 x 3 の魔法陣を解く。
 	 * 
 	 * 解答
-	 * 6,1,8
-	 * 7,5,3
-	 * 2,9,4
-	 * 
-	 * 6,7,2
-	 * 1,5,9
-	 * 8,3,4
-	 * 
 	 * 2,9,4
 	 * 7,5,3
 	 * 6,1,8
-	 * 
-	 * 2,7,6
-	 * 9,5,1
-	 * 4,3,8
-	 * 
-	 * 8,1,6
-	 * 3,5,7
-	 * 4,9,2
-	 * 
-	 * 8,3,4
-	 * 1,5,9
-	 * 6,7,2
-	 * 
-	 * 4,9,2
-	 * 3,5,7
-	 * 8,1,6
-	 * 
-	 * 4,3,8
-	 * 9,5,1
-	 * 2,7,6
 	 */
 	def test3 = {
 		def chunk[A](n: Int): Stream[A] => Stream[Stream[A]] = {
@@ -154,6 +126,10 @@ object Example extends FiniteDomainConstraintSolver {
 			for {
 				vars <- newVars(9, 1 to 9)
 				s <- newVar((1 + 2 + 3) to (7 + 8 + 9))
+//				s <- newVar(15)	// (1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9) / 3 = 15
+				_ <- vars(0) < vars(2)
+				_ <- vars(2) < vars(8)
+				_ <- vars(2) < vars(6)
 				_ <- allDifferent(vars)
 				_ <- mapM(rows(vars)) { allDifferent }
 				_ <- mapM(columns(vars)) { allDifferent }
@@ -161,13 +137,26 @@ object Example extends FiniteDomainConstraintSolver {
 				_ <- mapM(rows(vars)) { row => equalToSumOf(s)(row) }
 				_ <- mapM(columns(vars)) { col => equalToSumOf(s)(col) }
 				_ <- mapM(diagonals(vars)) { diag => equalToSumOf(s)(diag) }
+//				_ <- for {
+//					state <- get
+//					val network = state.network
+//					_ <- { println("graph \"constraints\" {\n" + network.mkString("\n") + "}"); unit0 }
+//				} yield unit0
 				solution <- labeling(vars)
 			} yield solution
 		}
 		
+		var ts: List[Long] = Nil
+		val n = 1
 		var beginTime = System.nanoTime
-		solve(magicTable).take(1) foreach { solution =>println(show(solution)) }
-		println("時間: " + (System.nanoTime - beginTime) / 1000000000.0 + "sec") 
+		for (i <- 1 to n) {
+			solve(magicTable).take(1) foreach { solution =>println(show(solution)) }
+			ts = (System.nanoTime - beginTime) :: ts
+			beginTime = System.nanoTime
+		}
+//		println(ts.map { t => t / 1000000000.0 }.mkString(", "))
+		val average = ts.foldRight(0L)(_ + _) / 1000000000.0 / n
+		println("時間: " + average + "sec") 
 	}
 	
 	/**
@@ -187,14 +176,14 @@ object Example extends FiniteDomainConstraintSolver {
 				_ <- s !== 0
 				_ <- m !== 0
 				_ <- allDifferent(vars)
-//				send <- newVar(1023 to 9876)
-//				more <- newVar(1023 to 9876)
-//				money <- newVar(10234 to 98765)
-//				_ <- equalToAddOf(money)(send, more)
-//				_ <- send === 1000 * s + 100 * e + 10 * n + d
-//				_ <- more === 1000 * m + 100 * o + 10 * r + e
-//				_ <- money === 10000 * m + 1000 * o + 100 * n + 10 * e + y
-				_ <- (1000 * (s + m) + 100 * (e + o) + 10 * (n + r) + d + e) === (10000 * m + 1000 * o + 100 * n + 10 * e + y)
+				send <- newVar(1023 to 9876)
+				more <- newVar(1023 to 9876)
+				money <- newVar(10234 to 98765)
+				_ <- equalToAddOf(money)(send, more)
+				_ <- send === 1000 * s + 100 * e + 10 * n + d
+				_ <- more === 1000 * m + 100 * o + 10 * r + e
+				_ <- money === 10000 * m + 1000 * o + 100 * n + 10 * e + y
+//				_ <- (1000 * (s + m) + 100 * (e + o) + 10 * (n + r) + d + e) === (10000 * m + 1000 * o + 100 * n + 10 * e + y)
 //				_ <- (1000 * s + 100 * e + 10 * n + d + 1000 * m + 100 * o + 10 * r + e) === (10000 * m + 1000 * o + 100 * n + 10 * e + y)
 				solution <- labeling(Stream(s, e, n, d, m, o, r, e, m, o, n, e, y))
 			} yield solution
